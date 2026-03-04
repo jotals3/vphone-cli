@@ -1,5 +1,7 @@
 """kernel_jb.py — Jailbreak extension patcher for iOS kernelcache."""
 
+import time
+
 from .kernel_jb_base import KernelJBPatcherBase
 from .kernel_jb_patch_amfi_trustcache import KernelJBPatchAmfiTrustcacheMixin
 from .kernel_jb_patch_amfi_execve import KernelJBPatchAmfiExecveMixin
@@ -54,38 +56,80 @@ class KernelJBPatcher(
     KernelJBPatchAmfiTrustcacheMixin,
     KernelJBPatcherBase,
 ):
+    _TIMING_LOG_MIN_SECONDS = 10.0
+
+    _GROUP_AB_METHODS = (
+        "patch_amfi_cdhash_in_trustcache",      # A1
+        "patch_amfi_execve_kill_path",          # A2
+        "patch_task_conversion_eval_internal",  # A3
+        "patch_sandbox_hooks_extended",         # A4
+        "patch_post_validation_additional",     # B5
+        "patch_proc_security_policy",           # B6
+        "patch_proc_pidinfo",                   # B7
+        "patch_convert_port_to_map",            # B8
+        "patch_vm_fault_enter_prepare",         # B9
+        "patch_vm_map_protect",                 # B10
+        "patch_mac_mount",                      # B11
+        "patch_dounmount",                      # B12
+        "patch_bsd_init_auth",                  # B13
+        "patch_spawn_validate_persona",         # B14
+        "patch_task_for_pid",                   # B15
+        "patch_load_dylinker",                  # B16
+        "patch_shared_region_map",              # B17
+        "patch_nvram_verify_permission",        # B18
+        "patch_io_secure_bsd_root",             # B19
+        "patch_thid_should_crash",              # B20
+    )
+    _GROUP_C_METHODS = (
+        "patch_cred_label_update_execve",       # C21
+        "patch_syscallmask_apply_to_proc",      # C22
+        "patch_hook_cred_label_update_execve",  # C23
+        "patch_kcall10",                        # C24
+    )
+
+    def __init__(self, data, verbose=False):
+        super().__init__(data, verbose)
+        self.patch_timings = []
+
+    def _run_patch_method_timed(self, method_name):
+        before = len(self.patches)
+        t0 = time.perf_counter()
+        getattr(self, method_name)()
+        dt = time.perf_counter() - t0
+        added = len(self.patches) - before
+        self.patch_timings.append((method_name, dt, added))
+        if dt >= self._TIMING_LOG_MIN_SECONDS:
+            print(f"  [T] {method_name:36s} {dt:7.3f}s  (+{added})")
+
+    def _run_methods(self, methods):
+        for method_name in methods:
+            self._run_patch_method_timed(method_name)
+
+    def _print_timing_summary(self):
+        if not self.patch_timings:
+            return
+        slow_items = [
+            item
+            for item in sorted(self.patch_timings, key=lambda item: item[1], reverse=True)
+            if item[1] >= self._TIMING_LOG_MIN_SECONDS
+        ]
+        if not slow_items:
+            return
+
+        print(
+            "\n  [Timing Summary] JB patch method cost (desc, >= "
+            f"{self._TIMING_LOG_MIN_SECONDS:.0f}s):"
+        )
+        for method_name, dt, added in slow_items:
+            print(f"    {dt:7.3f}s  (+{added:3d})  {method_name}")
+
     def find_all(self):
-        self.patches = []
+        self._reset_patch_state()
+        self.patch_timings = []
 
-        # Group A: Existing patches
-        self.patch_amfi_cdhash_in_trustcache()          # A1
-        self.patch_amfi_execve_kill_path()              # A2
-        self.patch_task_conversion_eval_internal()      # A3
-        self.patch_sandbox_hooks_extended()             # A4
-
-        # Group B: Simple patches (string-anchored / pattern-matched)
-        self.patch_post_validation_additional()           # B5
-        self.patch_proc_security_policy()                # B6 (fixed: was patching copyio)
-        self.patch_proc_pidinfo()                        # B7
-        self.patch_convert_port_to_map()                 # B8 (fixed: was patching PAC check)
-        self.patch_vm_fault_enter_prepare()              # B9
-        self.patch_vm_map_protect()                      # B10
-        self.patch_mac_mount()                           # B11
-        self.patch_dounmount()                           # B12
-        self.patch_bsd_init_auth()                       # B13
-        self.patch_spawn_validate_persona()              # B14
-        self.patch_task_for_pid()                        # B15
-        self.patch_load_dylinker()                       # B16
-        self.patch_shared_region_map()                   # B17
-        self.patch_nvram_verify_permission()             # B18
-        self.patch_io_secure_bsd_root()                  # B19
-        self.patch_thid_should_crash()                   # B20
-
-        # Group C: Complex shellcode patches
-        self.patch_cred_label_update_execve()            # C21
-        self.patch_syscallmask_apply_to_proc()           # C22
-        self.patch_hook_cred_label_update_execve()      # C23
-        self.patch_kcall10()                            # C24
+        self._run_methods(self._GROUP_AB_METHODS)
+        self._run_methods(self._GROUP_C_METHODS)
+        self._print_timing_summary()
 
         return self.patches
 

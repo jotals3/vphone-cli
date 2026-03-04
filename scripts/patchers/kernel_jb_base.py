@@ -3,6 +3,7 @@
 import struct
 from collections import Counter
 
+from .kernel_asm import _PACIBSP_U32
 from capstone.arm64_const import (
     ARM64_OP_REG,
     ARM64_OP_IMM,
@@ -38,6 +39,9 @@ MOV_X8_XZR = asm("mov x8, xzr")
 class KernelJBPatcherBase(KernelPatcher):
     def __init__(self, data, verbose=False):
         super().__init__(data, verbose)
+        self._jb_scan_cache = {}
+        self._proc_info_anchor_scanned = False
+        self._proc_info_anchor = (-1, -1)
         self._build_symbol_table()
 
     # ── Symbol table (best-effort, may find 0 on stripped kernels) ──
@@ -122,6 +126,79 @@ class KernelJBPatcherBase(KernelPatcher):
         """Look up a function symbol, return file offset or -1."""
         return self.symbols.get(name, -1)
 
+    # ── Shared kernel anchor finders ──────────────────────────────
+
+    def _find_proc_info_anchor(self):
+        """Find `_proc_info` switch anchor as (func_start, switch_off).
+
+        Shared by B6/B7 patches. Cached because searching this anchor in
+        `kern_text` is expensive on stripped kernels.
+        """
+        if self._proc_info_anchor_scanned:
+            return self._proc_info_anchor
+
+        def _scan_range(start, end):
+            """Fast raw matcher for:
+            sub wN, wM, #1
+            cmp wN, #0x21
+            """
+            key = ("proc_info_switch", start, end)
+            cached = self._jb_scan_cache.get(key)
+            if cached is not None:
+                return cached
+
+            scan_start = max(start, 0)
+            limit = min(end - 8, self.size - 8)
+            for off in range(scan_start, limit, 4):
+                i0 = _rd32(self.raw, off)
+                # SUB (immediate), 32-bit
+                if (i0 & 0xFF000000) != 0x51000000:
+                    continue
+                if ((i0 >> 22) & 1) != 0:  # sh must be 0
+                    continue
+                if ((i0 >> 10) & 0xFFF) != 1:
+                    continue
+                sub_rd = i0 & 0x1F
+
+                i1 = _rd32(self.raw, off + 4)
+                # CMP wN,#imm == SUBS wzr,wN,#imm alias (rd must be wzr)
+                if (i1 & 0xFF00001F) != 0x7100001F:
+                    continue
+                if ((i1 >> 22) & 1) != 0:  # sh must be 0
+                    continue
+                if ((i1 >> 10) & 0xFFF) != 0x21:
+                    continue
+                cmp_rn = (i1 >> 5) & 0x1F
+                if sub_rd != cmp_rn:
+                    continue
+
+                self._jb_scan_cache[key] = off
+                return off
+            self._jb_scan_cache[key] = -1
+            return -1
+
+        # Prefer direct symbol when present.
+        proc_info_func = self._resolve_symbol("_proc_info")
+        if proc_info_func >= 0:
+            search_end = min(proc_info_func + 0x800, self.size)
+            switch_off = _scan_range(proc_info_func, search_end)
+            if switch_off < 0:
+                switch_off = proc_info_func
+            self._proc_info_anchor = (proc_info_func, switch_off)
+            self._proc_info_anchor_scanned = True
+            return self._proc_info_anchor
+
+        ks, ke = self.kern_text
+        switch_off = _scan_range(ks, ke)
+        if switch_off >= 0:
+            proc_info_func = self.find_function_start(switch_off)
+            self._proc_info_anchor = (proc_info_func, switch_off)
+        else:
+            self._proc_info_anchor = (-1, -1)
+
+        self._proc_info_anchor_scanned = True
+        return self._proc_info_anchor
+
     # ── Code cave finder ──────────────────────────────────────────
 
     def _find_code_cave(self, size, align=4):
@@ -182,8 +259,7 @@ class KernelJBPatcherBase(KernelPatcher):
         """Find the end of a function (next PACIBSP or limit)."""
         limit = min(func_start + max_size, self.size)
         for off in range(func_start + 4, limit, 4):
-            d = self._disas_at(off)
-            if d and d[0].mnemonic == "pacibsp":
+            if _rd32(self.raw, off) == _PACIBSP_U32:
                 return off
         return limit
 

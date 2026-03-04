@@ -55,8 +55,7 @@ class KernelPatcher(
 
     def find_all(self):
         """Find and record all kernel patches.  Returns list of (offset, bytes, desc)."""
-        self.patches = []
-        self._patch_num = 0
+        self._reset_patch_state()
         self.patch_apfs_root_snapshot()  #  1
         self.patch_apfs_seal_broken()  #  2
         self.patch_bsd_init_rootvp()  #  3
@@ -69,7 +68,8 @@ class KernelPatcher(
         self.patch_apfs_vfsop_mount_cmp()  # 13
         self.patch_apfs_mount_upgrade_checks()  # 14
         self.patch_handle_fsioc_graft()  # 15
-        self.patch_sandbox_hooks()  # 16-25
+        self.patch_apfs_get_dev_by_role_entitlement()  # 16
+        self.patch_sandbox_hooks()  # 17-26
         return self.patches
 
     def apply(self):

@@ -1,6 +1,6 @@
 """Base class with all infrastructure for kernel patchers."""
 
-import struct, plistlib
+import struct, plistlib, threading
 from collections import defaultdict
 
 from capstone.arm64_const import (
@@ -26,8 +26,16 @@ class KernelPatcherBase:
         self.raw = bytes(data)  # immutable snapshot for searching
         self.size = len(data)
         self.patches = []  # collected (offset, bytes, description)
+        self._patch_by_off = {}  # offset -> (patch_bytes, desc)
         self.verbose = verbose
         self._patch_num = 0  # running counter for clean one-liners
+        self._emit_lock = threading.Lock()
+
+        # Hot-path caches (search/disassembly is repeated heavily in JB mode).
+        self._disas_cache = {}
+        self._disas_cache_limit = 200_000
+        self._string_refs_cache = {}
+        self._func_start_cache = {}
 
         self._log("[*] Parsing Mach-O segments …")
         self._parse_macho()
@@ -51,6 +59,12 @@ class KernelPatcherBase:
     def _log(self, msg):
         if self.verbose:
             print(msg)
+
+    def _reset_patch_state(self):
+        """Reset patch bookkeeping before a fresh find/apply pass."""
+        self.patches = []
+        self._patch_by_off = {}
+        self._patch_num = 0
 
     # ── Mach-O / segment parsing ─────────────────────────────────
     def _parse_macho(self):
@@ -314,11 +328,26 @@ class KernelPatcherBase:
     # ── Helpers ──────────────────────────────────────────────────
     def _disas_at(self, off, count=1):
         """Disassemble *count* instructions at file offset.  Returns a list."""
-        end = min(off + count * 4, self.size)
         if off < 0 or off >= self.size:
             return []
+
+        key = None
+        if count <= 4:
+            key = (off, count)
+            cached = self._disas_cache.get(key)
+            if cached is not None:
+                return cached
+
+        end = min(off + count * 4, self.size)
         code = bytes(self.raw[off:end])
-        return list(_cs.disasm(code, off, count))
+        insns = list(_cs.disasm(code, off, count))
+
+        if key is not None:
+            if len(self._disas_cache) >= self._disas_cache_limit:
+                self._disas_cache.clear()
+            self._disas_cache[key] = insns
+
+        return insns
 
     def _is_bl(self, off):
         """Return BL target file offset, or -1 if not a BL."""
@@ -354,6 +383,11 @@ class KernelPatcherBase:
 
     def find_string_refs(self, str_off, code_start=None, code_end=None):
         """Find all (adrp_off, add_off, dest_reg) referencing str_off via ADRP+ADD."""
+        key = (str_off, code_start, code_end)
+        cached = self._string_refs_cache.get(key)
+        if cached is not None:
+            return cached
+
         target_va = self._va(str_off)
         target_page = target_va & ~0xFFF
         page_off = target_va & 0xFFF
@@ -375,6 +409,7 @@ class KernelPatcherBase:
             if add_rn == rd and add_imm == page_off:
                 add_rd = nxt & 0x1F
                 refs.append((adrp_off, adrp_off + 4, add_rd))
+        self._string_refs_cache[key] = refs
         return refs
 
     def find_function_start(self, off, max_back=0x4000):
@@ -384,19 +419,33 @@ class KernelPatcherBase:
         bytes to look for PACIBSP (ARM64e functions may have several STP
         instructions in the prologue before STP x29,x30).
         """
+        use_cache = max_back == 0x4000
+        if use_cache:
+            cached = self._func_start_cache.get(off)
+            if cached is not None:
+                return cached
+
+        result = -1
         for o in range(off - 4, max(off - max_back, 0), -4):
             insn = _rd32(self.raw, o)
             if insn == _PACIBSP_U32:
-                return o
+                result = o
+                break
             dis = self._disas_at(o)
             if dis and dis[0].mnemonic == "stp" and "x29, x30, [sp" in dis[0].op_str:
                 # Check further back for PACIBSP (prologue may have
                 # multiple STP instructions before x29,x30)
                 for k in range(o - 4, max(o - 0x24, 0), -4):
                     if _rd32(self.raw, k) == _PACIBSP_U32:
-                        return k
-                return o
-        return -1
+                        result = k
+                        break
+                if result < 0:
+                    result = o
+                break
+
+        if use_cache:
+            self._func_start_cache[off] = result
+        return result
 
     def _disas_n(self, buf, off, count):
         """Disassemble *count* instructions from *buf* at file offset *off*."""
@@ -454,10 +503,24 @@ class KernelPatcherBase:
         Writing through to self.data ensures _find_code_cave() sees
         previously allocated shellcode and won't reuse the same cave.
         """
-        self.patches.append((off, patch_bytes, desc))
-        self.data[off : off + len(patch_bytes)] = patch_bytes
-        self._patch_num += 1
-        print(f"  [{self._patch_num:2d}] 0x{off:08X}  {desc}")
+        patch_bytes = bytes(patch_bytes)
+        with self._emit_lock:
+            existing = self._patch_by_off.get(off)
+            if existing is not None:
+                existing_bytes, existing_desc = existing
+                if existing_bytes != patch_bytes:
+                    raise RuntimeError(
+                        f"Conflicting patch at 0x{off:08X}: "
+                        f"{existing_desc!r} vs {desc!r}"
+                    )
+                return
+
+            self._patch_by_off[off] = (patch_bytes, desc)
+            self.patches.append((off, patch_bytes, desc))
+            self.data[off : off + len(patch_bytes)] = patch_bytes
+            self._patch_num += 1
+            patch_num = self._patch_num
+        print(f"  [{patch_num:2d}] 0x{off:08X}  {desc}")
         if self.verbose:
             self._print_patch_context(off, patch_bytes, desc)
 
@@ -614,4 +677,3 @@ class KernelPatcherBase:
         if val == 0:
             return 0
         return self._decode_chained_ptr(val)
-

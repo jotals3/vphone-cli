@@ -43,6 +43,7 @@ Three firmware variants are available, each building on the previous:
 ### TXM
 
 TXM patch composition by variant:
+
 - Regular: `txm.py` (1 patch).
 - Dev: `txm.py` (1 patch) + `txm_dev.py` (11 patches) = 12 total.
 - JB: same as Dev (selector24 bypass now in `txm_dev.py`, no separate JB patcher).
@@ -64,25 +65,26 @@ TXM patch composition by variant:
 
 ### Kernelcache
 
-Regular and Dev share the same 25 base kernel patches. JB adds 34 additional patches.
+Regular and Dev share the same 28 base kernel patches. JB adds 34 additional patches.
 
 #### Base patches (all variants)
 
-| #     | Patch                      | Function                         | Purpose                                  | Regular | Dev | JB  |
-| ----- | -------------------------- | -------------------------------- | ---------------------------------------- | :-----: | :-: | :-: |
-| 1     | NOP `tbnz w8,#5`           | `_apfs_vfsop_mount`              | Skip "root snapshot" sealed volume check |    Y    |  Y  |  Y  |
-| 2     | NOP conditional            | `_authapfs_seal_is_broken`       | Skip "root volume seal" panic            |    Y    |  Y  |  Y  |
-| 3     | NOP conditional            | `_bsd_init`                      | Skip "rootvp not authenticated" panic    |    Y    |  Y  |  Y  |
-| 4–5   | `mov w0,#0; ret`           | `_proc_check_launch_constraints` | Bypass launch constraints                |    Y    |  Y  |  Y  |
-| 6–7   | `mov x0,#1` (2x)           | `PE_i_can_has_debugger`          | Enable kernel debugger                   |    Y    |  Y  |  Y  |
-| 8     | NOP                        | `_postValidation`                | Skip AMFI post-validation                |    Y    |  Y  |  Y  |
-| 9     | `cmp w0,w0`                | `_postValidation`                | Force comparison true                    |    Y    |  Y  |  Y  |
-| 10–11 | `mov w0,#1` (2x)           | `_check_dyld_policy_internal`    | Allow dyld loading                       |    Y    |  Y  |  Y  |
-| 12    | `mov w0,#0`                | `_apfs_graft`                    | Allow APFS graft                         |    Y    |  Y  |  Y  |
-| 13    | `cmp x0,x0`                | `_apfs_vfsop_mount`              | Skip mount check                         |    Y    |  Y  |  Y  |
-| 14    | `mov w0,#0`                | `_apfs_mount_upgrade_checks`     | Allow mount upgrade                      |    Y    |  Y  |  Y  |
-| 15    | `mov w0,#0`                | `_handle_fsioc_graft`            | Allow fsioc graft                        |    Y    |  Y  |  Y  |
-| 16–25 | `mov x0,#0; ret` (5 hooks) | Sandbox MACF ops table           | Stub 5 sandbox hooks                     |    Y    |  Y  |  Y  |
+| #     | Patch                      | Function                         | Purpose                                                                                   | Regular | Dev | JB  |
+| ----- | -------------------------- | -------------------------------- | ----------------------------------------------------------------------------------------- | :-----: | :-: | :-: |
+| 1     | NOP `tbnz w8,#5`           | `_apfs_vfsop_mount`              | Skip "root snapshot" sealed volume check                                                  |    Y    |  Y  |  Y  |
+| 2     | NOP conditional            | `_authapfs_seal_is_broken`       | Skip "root volume seal" panic                                                             |    Y    |  Y  |  Y  |
+| 3     | NOP conditional            | `_bsd_init`                      | Skip "rootvp not authenticated" panic                                                     |    Y    |  Y  |  Y  |
+| 4–5   | `mov w0,#0; ret`           | `_proc_check_launch_constraints` | Bypass launch constraints                                                                 |    Y    |  Y  |  Y  |
+| 6–7   | `mov x0,#1` (2x)           | `PE_i_can_has_debugger`          | Enable kernel debugger                                                                    |    Y    |  Y  |  Y  |
+| 8     | NOP                        | `_postValidation`                | Skip AMFI post-validation                                                                 |    Y    |  Y  |  Y  |
+| 9     | `cmp w0,w0`                | `_postValidation`                | Force comparison true                                                                     |    Y    |  Y  |  Y  |
+| 10–11 | `mov w0,#1` (2x)           | `_check_dyld_policy_internal`    | Allow dyld loading                                                                        |    Y    |  Y  |  Y  |
+| 12    | `mov w0,#0`                | `_apfs_graft`                    | Allow APFS graft                                                                          |    Y    |  Y  |  Y  |
+| 13    | `cmp x0,x0`                | `_apfs_vfsop_mount`              | Skip mount check                                                                          |    Y    |  Y  |  Y  |
+| 14    | `mov w0,#0`                | `_apfs_mount_upgrade_checks`     | Allow mount upgrade                                                                       |    Y    |  Y  |  Y  |
+| 15    | `mov w0,#0`                | `_handle_fsioc_graft`            | Allow fsioc graft                                                                         |    Y    |  Y  |  Y  |
+| 16    | `NOP` (3x)                 | `handle_get_dev_by_role`         | Bypass APFS role-lookup deny gates for boot mounts (context + entitlement + role==2 path) |    Y    |  Y  |  Y  |
+| 17–26 | `mov x0,#0; ret` (5 hooks) | Sandbox MACF ops table           | Stub 5 sandbox hooks                                                                      |    Y    |  Y  |  Y  |
 
 #### JB-only kernel patches
 
@@ -138,23 +140,39 @@ Regular and Dev share the same 25 base kernel patches. JB adds 34 additional pat
 | 7   | Procursus bootstrap      | Bootstrap filesystem + optional Sileo deb                         |    —    |  —  |  Y  |
 | 8   | BaseBin hooks            | systemhook.dylib, launchdhook.dylib, libellekit.dylib → `/cores/` |    —    |  —  |  Y  |
 
+### CFW Installer Flow Matrix (Script-Level)
+
+| Flow item | Regular (`cfw_install.sh`) | Dev (`cfw_install_dev.sh`) | JB (`cfw_install_jb.sh`) |
+| --- | --- | --- | --- |
+| Base CFW phases (1/7 → 7/7) | Runs directly | Runs directly | Runs via `CFW_SKIP_HALT=1 zsh cfw_install.sh` |
+| Dev overlay (`rpcserver_ios` replacement in `iosbinpack64.tar`) | — | Y (`apply_dev_overlay`) | — |
+| SSH readiness wait before install | Y (`wait_for_device_ssh_ready`) | — | Y (inherited from base run) |
+| `remote_mount` behavior | Ensures mountpoint and verifies mount success (hard fail) | Best-effort mount only (`mount_apfs ... || true`) | Ensures mountpoint and verifies mount success (hard fail) |
+| launchd jetsam patch (`patch-launchd-jetsam`) | — | Y (base-flow injection) | Y (JB-1) |
+| launchd dylib injection (`inject-dylib /cores/launchdhook.dylib`) | — | — | Y (JB-1) |
+| Procursus bootstrap deployment (`/mnt5/<bootHash>/jb-vphone/procursus`) | — | — | Y (JB-2) |
+| BaseBin hook deployment (`*.dylib` → `/mnt1/cores`) | — | — | Y (JB-3) |
+| Additional input resources | `cfw_input` | `cfw_input` + `resources/cfw_dev/rpcserver_ios` | `cfw_input` + `cfw_jb_input` |
+| Extra tool requirement beyond base | — | — | `zstd` |
+| Halt behavior | Halts unless `CFW_SKIP_HALT=1` | Halts unless `CFW_SKIP_HALT=1` | Always halts after JB phases |
+
 ## Summary
 
-| Component                | Regular |  Dev   |   JB   |
-| ------------------------ | :-----: | :----: | :----: |
-| AVPBooter                |    1    |   1    |   1    |
-| iBSS                     |    2    |   2    |   3    |
-| iBEC                     |    3    |   3    |   3    |
-| LLB                      |    6    |   6    |   6    |
-| TXM                      |    1    |   12   |   12   |
-| Kernel                   |   25    |   25   |   59   |
-| **Boot chain total**     | **38**  | **49** | **84** |
-|                          |         |        |        |
-| CFW binary patches       |    4    |   5    |   6    |
-| CFW installed components |    6    |   7    |   8    |
-| **CFW total**            | **10**  | **12** | **14** |
-|                          |         |        |        |
-| **Grand total**          | **48**  | **61** | **98** |
+| Component                | Regular |  Dev   |   JB    |
+| ------------------------ | :-----: | :----: | :-----: |
+| AVPBooter                |    1    |   1    |    1    |
+| iBSS                     |    2    |   2    |    3    |
+| iBEC                     |    3    |   3    |    3    |
+| LLB                      |    6    |   6    |    6    |
+| TXM                      |    1    |   12   |   12    |
+| Kernel                   |   28    |   28   |   62    |
+| **Boot chain total**     | **41**  | **52** | **87**  |
+|                          |         |        |         |
+| CFW binary patches       |    4    |   5    |    6    |
+| CFW installed components |    6    |   7    |    8    |
+| **CFW total**            | **10**  | **12** | **14**  |
+|                          |         |        |         |
+| **Grand total**          | **51**  | **64** | **101** |
 
 ### What each variant adds
 
@@ -184,18 +202,25 @@ Regular and Dev share the same 25 base kernel patches. JB adds 34 additional pat
     - `jb/org.coolstar.sileo_2.5.1_iphoneos-arm64.deb`
     - `basebin/*.dylib` (BaseBin hooks for JB-3)
 
-## Ramdisk Kernel Split (JB mode)
+## Ramdisk Variant Matrix (`make ramdisk_build`)
 
-- `scripts/fw_patch_jb.py` now snapshots the base/dev-patched kernel before JB kernel extensions:
-  - `iPhone*_Restore/kernelcache.research.vphone600.ramdisk`
-- `scripts/ramdisk_build.py` uses that snapshot to build:
-  - `Ramdisk/krnl.ramdisk.img4` (base/dev kernel for SSH ramdisk boot + CFW install)
-  - `Ramdisk/krnl.img4` (post-JB kernel, unchanged restore target)
-- `scripts/ramdisk_send.sh` now prefers `krnl.ramdisk.img4` when present, otherwise falls back to `krnl.img4`.
-- Intent: keep restore kernel fully JB-patched while booting the installer ramdisk with a
-  more conservative kernel variant to improve `/dev/disk1s1` remount reliability.
-- Investigation details and runtime evidence:
-  - `research/jb_mount_failure_investigation_2026-03-04.md`
+Why `ramdisk_build` still prints patch logs:
+
+- Step 6 patches `Firmware/txm.iphoneos.release.im4p` via `patch_txm()` (1 trustcache-bypass patch), then signs `Ramdisk/txm.img4`.
+- Step 7 may derive `kernelcache.research.vphone600.ramdisk` from pristine CloudOS and apply base `KernelPatcher` (28 patches), then signs `Ramdisk/krnl.ramdisk.img4`.
+- Step 7 also always signs restore kernel as `Ramdisk/krnl.img4`.
+
+| Variant       | Pre-step before `make ramdisk_build` | `Ramdisk/txm.img4`               | `Ramdisk/krnl.ramdisk.img4`                                                            | `Ramdisk/krnl.img4`                                      | Effective kernel used by `ramdisk_send.sh`            |
+| ------------- | ------------------------------------ | -------------------------------- | -------------------------------------------------------------------------------------- | -------------------------------------------------------- | ----------------------------------------------------- |
+| `RAMDISK`     | `make fw_patch`                      | release TXM + base TXM patch (1) | base kernel (28): use legacy `*.ramdisk` if present, else derive from pristine CloudOS | restore kernel from `fw_patch` (28)                      | `krnl.ramdisk.img4` (preferred), fallback `krnl.img4` |
+| `DEV+RAMDISK` | `make fw_patch_dev`                  | release TXM + base TXM patch (1) | base kernel (28): same derivation rule as above                                        | restore kernel from `fw_patch_dev` (28)                  | `krnl.ramdisk.img4` (preferred), fallback `krnl.img4` |
+| `JB+RAMDISK`  | `make fw_patch_jb`                   | release TXM + base TXM patch (1) | base kernel (28): same derivation rule as above                                        | restore kernel from `fw_patch_jb` (62 = 28 base + 34 JB) | `krnl.ramdisk.img4` (preferred), fallback `krnl.img4` |
+
+Notes:
+
+- `scripts/fw_patch_jb.py` no longer creates a ramdisk snapshot file directly.
+- Intent: keep ramdisk boot on a conservative base kernel while preserving full patched restore kernel for later JB flow.
+- Investigation details and runtime evidence: `research/jb_mount_failure_investigation_2026-03-04.md`
 
 ## Dynamic Implementation Log (JB Patchers)
 
@@ -270,6 +295,12 @@ with capstone semantic matching and keystone-generated patch bytes only:
 
 5. `_postValidation` additional CMP bypass
 6. `_proc_security_policy` stub (mov x0,#0; ret) — FIXED: was patching copyio instead
+   - Runtime optimization (2026-03-05): locator switched from capstone full-text scan to
+     raw instruction-mask matching (`sub wN,wM,#1 ; cmp wN,#0x21`, strict W-form) + raw
+     BL decode in `_proc_info` body; shared `_proc_info` anchor scan cache reused by
+     `_proc_pidinfo`.
+   - JB timing logger readability tweak (2026-03-05): per-method `[T]` and timing summary
+     now only print slow methods (runtime `>=10s`), patch output/selection unchanged.
 7. `_proc_pidinfo` pid-0 guard NOP (2 sites)
 8. `_convert_port_to_map_with_flavor` panic skip — FIXED: was patching PAC check instead
 9. `_vm_fault_enter_prepare` PMAP check NOP
@@ -290,14 +321,14 @@ with capstone semantic matching and keystone-generated patch bytes only:
 21. `_cred_label_update_execve` cs_flags shellcode
 22. `_syscallmask_apply_to_proc` filter mask shellcode
 23. `_hook_cred_label_update_execve` inline trampoline + vnode_getattr shellcode
-       - Code cave restricted to __TEXT_EXEC only (__PRELINK_TEXT excluded due to KTRR)
-       - Inline trampoline (B cave at function entry) replaces ops table pointer rewrite
-       - Ops table pointer modification breaks chained fixup integrity → PAC failures
+    - Code cave restricted to **TEXT_EXEC only (**PRELINK_TEXT excluded due to KTRR)
+    - Inline trampoline (B cave at function entry) replaces ops table pointer rewrite
+    - Ops table pointer modification breaks chained fixup integrity → PAC failures
 24. `kcall10` syscall 439 replacement shellcode
-       - Sysent table base found via backward scan from first `_nosys` match (entry 0 is indirect syscall, not `_nosys`)
-       - `sy_call` encoded as auth rebase chained fixup pointer (diversity=0xBCAD, key=IA, addrDiv=0)
-       - Matches dispatch's `BLRAA X8, X17` with `X17=0xBCAD` PAC authentication
-       - Chain `next` field preserved from original entry to maintain fixup chain integrity
+    - Sysent table base found via backward scan from first `_nosys` match (entry 0 is indirect syscall, not `_nosys`)
+    - `sy_call` encoded as auth rebase chained fixup pointer (diversity=0xBCAD, key=IA, addrDiv=0)
+    - Matches dispatch's `BLRAA X8, X17` with `X17=0xBCAD` PAC authentication
+    - Chain `next` field preserved from original entry to maintain fixup chain integrity
 
 ## Cross-Version Dynamic Snapshot
 

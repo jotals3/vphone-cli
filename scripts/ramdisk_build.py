@@ -42,6 +42,7 @@ from fw_patch import (
     find_file,
 )
 from patchers.iboot import IBootPatcher
+from patchers.kernel import KernelPatcher
 
 # ══════════════════════════════════════════════════════════════════
 # Configuration
@@ -210,6 +211,59 @@ def build_kernel_img4(kernel_src, output_dir, temp_dir, im4m_path, output_name, 
     _save_im4p_with_payp(kc_im4p, KERNEL_FOURCC, data, original_raw)
     sign_img4(kc_im4p, os.path.join(output_dir, output_name), im4m_path)
     print(f"  [+] {output_name}")
+
+
+def _find_pristine_cloudos_kernel():
+    """Find a pristine CloudOS vphone600 research kernel from project ipsws/."""
+    env_path = os.environ.get("RAMDISK_BASE_KERNEL", "").strip()
+    if env_path:
+        p = os.path.abspath(env_path)
+        if os.path.isfile(p):
+            return p
+        print(f"  [!] RAMDISK_BASE_KERNEL set but not found: {p}")
+
+    project_root = os.path.abspath(os.path.join(_SCRIPT_DIR, ".."))
+    patterns = [
+        os.path.join(project_root, "ipsws", "PCC-CloudOS*", "kernelcache.research.vphone600"),
+        os.path.join(project_root, "ipsws", "*CloudOS*", "kernelcache.research.vphone600"),
+    ]
+    for pattern in patterns:
+        matches = sorted(glob.glob(pattern))
+        if matches:
+            return matches[0]
+    return None
+
+
+def derive_ramdisk_kernel_source(kc_src, temp_dir):
+    """Get source kernel for krnl.ramdisk.img4 entirely within ramdisk_build flow.
+
+    Priority:
+      1) Existing legacy snapshot next to restore kernel (`*.ramdisk`)
+      2) Derive from pristine CloudOS kernel by applying base KernelPatcher
+    """
+    legacy_snapshot = f"{kc_src}{RAMDISK_KERNEL_SUFFIX}"
+    if os.path.isfile(legacy_snapshot):
+        print(f"  found legacy ramdisk kernel snapshot: {legacy_snapshot}")
+        return legacy_snapshot
+
+    pristine = _find_pristine_cloudos_kernel()
+    if not pristine:
+        print("  [!] pristine CloudOS kernel not found; skipping ramdisk-specific kernel image")
+        return None
+
+    print(f"  deriving ramdisk kernel from pristine source: {pristine}")
+    im4p_obj, data, was_im4p, original_raw = load_firmware(pristine)
+    kp = KernelPatcher(data)
+    n = kp.apply()
+    print(f"  [+] {n} base kernel patches applied for ramdisk variant")
+
+    out_path = os.path.join(temp_dir, f"kernelcache.research.vphone600{RAMDISK_KERNEL_SUFFIX}")
+    if was_im4p and im4p_obj is not None:
+        _save_im4p_with_payp(out_path, im4p_obj.fourcc, data, original_raw)
+    else:
+        with open(out_path, "wb") as f:
+            f.write(data)
+    return out_path
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -587,10 +641,9 @@ def main():
         ],
         "kernelcache",
     )
-    kc_ramdisk_src = f"{kc_src}{RAMDISK_KERNEL_SUFFIX}"
-    if os.path.isfile(kc_ramdisk_src):
-        print(f"  found ramdisk kernel snapshot: {kc_ramdisk_src}")
-        print(f"  building {RAMDISK_KERNEL_IMG4} from base/dev snapshot")
+    kc_ramdisk_src = derive_ramdisk_kernel_source(kc_src, temp_dir)
+    if kc_ramdisk_src:
+        print(f"  building {RAMDISK_KERNEL_IMG4} from ramdisk kernel source")
         build_kernel_img4(
             kc_ramdisk_src,
             output_dir,
@@ -599,24 +652,16 @@ def main():
             RAMDISK_KERNEL_IMG4,
             "kcache_ramdisk",
         )
-        print("  building krnl.img4 from restore kernel (post-JB)")
-        build_kernel_img4(
-            kc_src,
-            output_dir,
-            temp_dir,
-            im4m_path,
-            "krnl.img4",
-            "kcache_jb",
-        )
-    else:
-        build_kernel_img4(
-            kc_src,
-            output_dir,
-            temp_dir,
-            im4m_path,
-            "krnl.img4",
-            "kcache",
-        )
+        print("  building krnl.img4 from restore kernel")
+
+    build_kernel_img4(
+        kc_src,
+        output_dir,
+        temp_dir,
+        im4m_path,
+        "krnl.img4",
+        "kcache",
+    )
 
     # ── 8. Ramdisk + Trustcache ──────────────────────────────────
     print(f"\n{'=' * 60}")

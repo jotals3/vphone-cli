@@ -1,6 +1,6 @@
 """Mixin: KernelJBPatchProcSecurityMixin."""
 
-from .kernel_jb_base import ARM64_OP_IMM, MOV_X0_0, RET, Counter, _rd32, struct
+from .kernel_jb_base import MOV_X0_0, RET, Counter, _rd32
 
 
 class KernelJBPatchProcSecurityMixin:
@@ -22,31 +22,10 @@ class KernelJBPatchProcSecurityMixin:
             self.emit(foff + 4, RET, "ret [_proc_security_policy]")
             return True
 
-        # Find _proc_info by its distinctive switch table
-        # Pattern: sub wN, wM, #1; cmp wN, #0x21 (33 = max proc_info callnum)
-        proc_info_func = -1
-        switch_off = -1
+        # Find _proc_info by switch pattern:
+        # sub wN,wM,#1 ; cmp wN,#0x21
+        proc_info_func, switch_off = self._find_proc_info_anchor()
         ks, ke = self.kern_text
-        for off in range(ks, ke - 8, 4):
-            d = self._disas_at(off, 2)
-            if len(d) < 2:
-                continue
-            i0, i1 = d[0], d[1]
-            if i0.mnemonic != "sub" or i1.mnemonic != "cmp":
-                continue
-            if len(i0.operands) < 3:
-                continue
-            if i0.operands[2].type != ARM64_OP_IMM or i0.operands[2].imm != 1:
-                continue
-            if len(i1.operands) < 2:
-                continue
-            if i1.operands[1].type != ARM64_OP_IMM or i1.operands[1].imm != 0x21:
-                continue
-            if i0.operands[0].reg != i1.operands[0].reg:
-                continue
-            proc_info_func = self.find_function_start(off)
-            switch_off = off
-            break
 
         if proc_info_func < 0:
             self._log("  [-] _proc_info function not found")
@@ -62,8 +41,14 @@ class KernelJBPatchProcSecurityMixin:
         # since security policy is called from switch cases not the prologue)
         bl_targets = Counter()
         for off in range(switch_off, proc_info_end, 4):
-            target = self._is_bl(off)
-            if target >= 0 and ks <= target < ke:
+            insn = _rd32(self.raw, off)
+            if (insn & 0xFC000000) != 0x94000000:
+                continue
+            imm26 = insn & 0x3FFFFFF
+            if imm26 & (1 << 25):
+                imm26 -= 1 << 26
+            target = off + imm26 * 4
+            if ks <= target < ke:
                 bl_targets[target] += 1
 
         if not bl_targets:

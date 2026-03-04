@@ -1,6 +1,6 @@
 """Mixin: KernelJBPatchProcPidinfoMixin."""
 
-from .kernel_jb_base import ARM64_OP_IMM, NOP
+from .kernel_jb_base import NOP
 
 
 class KernelJBPatchProcPidinfoMixin:
@@ -30,28 +30,8 @@ class KernelJBPatchProcPidinfoMixin:
                 self.emit(hits[1], NOP, "NOP [_proc_pidinfo pid-0 guard B]")
                 return True
 
-        # Find _proc_info by switch table pattern (same as proc_security_policy)
-        proc_info_func = -1
-        ks, ke = self.kern_text
-        for off in range(ks, ke - 8, 4):
-            d = self._disas_at(off, 2)
-            if len(d) < 2:
-                continue
-            i0, i1 = d[0], d[1]
-            if i0.mnemonic != "sub" or i1.mnemonic != "cmp":
-                continue
-            if len(i0.operands) < 3:
-                continue
-            if i0.operands[2].type != ARM64_OP_IMM or i0.operands[2].imm != 1:
-                continue
-            if len(i1.operands) < 2:
-                continue
-            if i1.operands[1].type != ARM64_OP_IMM or i1.operands[1].imm != 0x21:
-                continue
-            if i0.operands[0].reg != i1.operands[0].reg:
-                continue
-            proc_info_func = self.find_function_start(off)
-            break
+        # Reuse proc_info anchor from proc_security path (cached).
+        proc_info_func, _ = self._find_proc_info_anchor()
 
         if proc_info_func < 0:
             self._log("  [-] _proc_info function not found")

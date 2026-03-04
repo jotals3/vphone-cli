@@ -9,7 +9,6 @@ This script extends fw_patch_dev with additional JB-oriented patches.
 """
 
 import os
-import shutil
 import sys
 
 from fw_patch import (
@@ -25,9 +24,6 @@ from fw_patch import (
 from fw_patch_dev import patch_txm_dev
 from patchers.iboot_jb import IBootJBPatcher
 from patchers.kernel_jb import KernelJBPatcher
-
-RAMDISK_KERNEL_SUFFIX = ".ramdisk"
-KERNEL_SEARCH_PATTERNS = ["kernelcache.research.vphone600"]
 
 
 def patch_ibss_jb(data):
@@ -73,17 +69,6 @@ JB_COMPONENTS = [
         True,
     ),
 ]
-
-
-def snapshot_base_kernel_for_ramdisk(restore_dir):
-    """Save base/dev-patched kernel before JB extensions for ramdisk boot."""
-    kernel_path = find_file(restore_dir, KERNEL_SEARCH_PATTERNS, "kernelcache")
-    ramdisk_kernel_path = f"{kernel_path}{RAMDISK_KERNEL_SUFFIX}"
-    shutil.copy2(kernel_path, ramdisk_kernel_path)
-    print(f"[*] Saved ramdisk kernel snapshot: {ramdisk_kernel_path}")
-    return ramdisk_kernel_path
-
-
 def main():
     vm_dir = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
     vm_dir = os.path.abspath(vm_dir)
@@ -105,8 +90,6 @@ def main():
         search_base = restore_dir if in_restore else vm_dir
         path = find_file(search_base, patterns, name)
         patch_component(path, patch_fn, name, preserve_payp)
-
-    snapshot_base_kernel_for_ramdisk(restore_dir)
 
     if JB_COMPONENTS:
         print(f"\n[*] Applying {len(JB_COMPONENTS)} JB extension patches ...")

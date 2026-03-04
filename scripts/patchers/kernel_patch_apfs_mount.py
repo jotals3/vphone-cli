@@ -1,8 +1,14 @@
 """Mixin: APFS mount checks patches."""
 
-from capstone.arm64_const import ARM64_OP_REG, ARM64_REG_W0, ARM64_REG_X0
+from capstone.arm64_const import (
+    ARM64_OP_IMM,
+    ARM64_OP_REG,
+    ARM64_REG_W0,
+    ARM64_REG_W8,
+    ARM64_REG_X0,
+)
 
-from .kernel_asm import CMP_X0_X0, MOV_W0_0, _PACIBSP_U32, _rd32
+from .kernel_asm import CMP_X0_X0, MOV_W0_0, NOP, _PACIBSP_U32, _rd32
 
 
 class KernelPatchApfsMountMixin:
@@ -140,4 +146,103 @@ class KernelPatchApfsMountMixin:
                     return True
 
         self._log("  [-] BL + TBNZ w0 pattern not found")
+        return False
+
+    def patch_apfs_get_dev_by_role_entitlement(self):
+        """Patch 16: bypass APFS get-dev-by-role entitlement gate.
+
+        In handle_get_dev_by_role, APFS checks:
+          1) context predicate (BL ... ; CBZ X0, deny)
+          2) entitlement check for "com.apple.apfs.get-dev-by-role"
+             (BL ... ; CBZ W0, deny)
+
+        mount-phase-1 for /private/preboot and /private/xarts can fail here with:
+          "%s:%d: %s This operation needs entitlement" (line 13101)
+
+        We NOP the deny branches so the function continues into normal role lookup.
+        """
+        self._log("\n[16] handle_get_dev_by_role: bypass entitlement gate")
+
+        str_off = self.find_string(b"com.apple.apfs.get-dev-by-role")
+        if str_off < 0:
+            self._log("  [-] entitlement string not found")
+            return False
+
+        refs = self.find_string_refs(str_off, *self.apfs_text)
+        if not refs:
+            self._log("  [-] no code refs to entitlement string")
+            return False
+
+        def _is_entitlement_error_block(target_off, func_end):
+            """Heuristic: target block sets known entitlement-gate line IDs."""
+            scan_end = min(target_off + 0x30, func_end)
+            for off in range(target_off, scan_end, 4):
+                ins = self._disas_at(off)
+                if not ins:
+                    continue
+                i = ins[0]
+                # Keep scan local to the direct target block.
+                # Crossing a call/unconditional jump usually means a different path.
+                if i.mnemonic in ("bl", "b", "ret", "retab"):
+                    break
+                if i.mnemonic != "mov" or len(i.operands) < 2:
+                    continue
+                if (
+                    i.operands[0].type == ARM64_OP_REG
+                    and i.operands[0].reg == ARM64_REG_W8
+                    and i.operands[1].type == ARM64_OP_IMM
+                    and i.operands[1].imm in (0x332D, 0x333B)
+                ):
+                    return True
+            return False
+
+        for ref in refs:
+            ref_off = ref[0]
+            func_start = self.find_function_start(ref_off)
+            if func_start < 0:
+                continue
+            func_end = min(func_start + 0x1200, self.size)
+
+            # Hardened logic:
+            #   patch all CBZ/CBNZ on X0/W0 that jump into entitlement
+            #   error blocks (line 0x33xx logger paths).
+            candidates = []
+            for off in range(func_start, func_end, 4):
+                ins = self._disas_at(off)
+                if not ins:
+                    continue
+                i = ins[0]
+                if i.mnemonic not in ("cbz", "cbnz") or len(i.operands) < 2:
+                    continue
+                if (
+                    i.operands[0].type != ARM64_OP_REG
+                    or i.operands[1].type != ARM64_OP_IMM
+                ):
+                    continue
+                if i.operands[0].reg not in (ARM64_REG_W0, ARM64_REG_X0):
+                    continue
+
+                target = i.operands[1].imm
+                if not (func_start <= target < func_end):
+                    continue
+                if target <= off:
+                    continue
+                if not _is_entitlement_error_block(target, func_end):
+                    continue
+
+                # Keep deterministic order; avoid duplicate offsets.
+                if all(prev_off != off for prev_off, _, _ in candidates):
+                    candidates.append((off, i.operands[0].reg, target))
+
+            if candidates:
+                for off, reg, target in candidates:
+                    gate = "context" if reg == ARM64_REG_X0 else "entitlement"
+                    self.emit(
+                        off,
+                        NOP,
+                        f"NOP [handle_get_dev_by_role {gate} check -> 0x{target:X}]",
+                    )
+                return True
+
+        self._log("  [-] handle_get_dev_by_role entitlement gate pattern not found")
         return False
